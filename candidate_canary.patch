@@ -1,0 +1,137 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index cb894086d4..56c985b430 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -867,6 +867,20 @@ using web_app::ChromeContentBrowserClientIsolatedWebAppsPart;
+ 
+ namespace {
+ 
++class CanaryThrottle : public blink::URLLoaderThrottle {
++ public:
++  explicit CanaryThrottle(std::string id) : id_(std::move(id)) {}
++
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool*) override {
++    if (request->url.SchemeIsHTTPOrHTTPS())
++      request->cors_exempt_headers.SetHeader("X-Candidate-Canary", id_);
++  }
++
++ private:
++  std::string id_;
++};
++
+ const char kAIManagerUserDataKey[] = "ai_manager";
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -6372,6 +6386,13 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+     result.push_back(std::move(glic_throttle));
+   }
+ 
++  const std::string candidate_id =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "inject-candidate-id");
++  if (!candidate_id.empty()) {
++    result.push_back(std::make_unique<CanaryThrottle>(candidate_id));
++  }
++
+   return result;
+ }
+ 
+diff --git a/chrome/renderer/url_loader_throttle_provider_impl.cc b/chrome/renderer/url_loader_throttle_provider_impl.cc
+index 3b9484cb59..4e3befb76b 100644
+--- a/chrome/renderer/url_loader_throttle_provider_impl.cc
++++ b/chrome/renderer/url_loader_throttle_provider_impl.cc
+@@ -32,6 +32,7 @@
+ #include "net/http/structured_headers.h"
+ #include "services/network/public/cpp/resource_request.h"
+ #include "third_party/blink/public/common/loader/resource_type_util.h"
++#include "third_party/blink/public/common/loader/url_loader_throttle.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+@@ -58,6 +59,20 @@
+ 
+ namespace {
+ 
++class CanaryThrottle : public blink::URLLoaderThrottle {
++ public:
++  explicit CanaryThrottle(std::string id) : id_(std::move(id)) {}
++
++  void WillStartRequest(network::ResourceRequest* request,
++                        bool*) override {
++    if (request->url.SchemeIsHTTPOrHTTPS())
++      request->cors_exempt_headers.SetHeader("X-Candidate-Canary", id_);
++  }
++
++ private:
++  std::string id_;
++};
++
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+ std::unique_ptr<extensions::ExtensionThrottleManager>
+ CreateExtensionThrottleManager() {
+@@ -295,6 +310,13 @@ URLLoaderThrottleProviderImpl::CreateThrottles(
+     }
+   }
+ 
++  const std::string candidate_id =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "inject-candidate-id");
++  if (!candidate_id.empty()) {
++    throttles.push_back(std::make_unique<CanaryThrottle>(candidate_id));
++  }
++
+   return throttles;
+ }
+ 
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index fa725c5a0a..23b11ff5bf 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -4112,6 +4112,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+ #if BUILDFLAG(IS_CHROMEOS)
+       switches::kSchedulerBoostUrgent,
+ #endif
++      "inject-candidate-id",
+   };
+   renderer_cmd->CopySwitchesFrom(browser_cmd, kSwitchNames);
+ 
+diff --git a/content/browser/storage_partition_impl.cc b/content/browser/storage_partition_impl.cc
+index 5866d69703..e43ea7c6d3 100644
+--- a/content/browser/storage_partition_impl.cc
++++ b/content/browser/storage_partition_impl.cc
+@@ -3579,6 +3579,7 @@ void StoragePartitionImpl::InitNetworkContext() {
+   context_params->cors_exempt_header_list.push_back(
+       GetCorsExemptRequestedWithHeaderName());
+   context_params->cors_exempt_header_list.push_back("Last-Event-ID");
++  context_params->cors_exempt_header_list.push_back("X-Candidate-Canary");
+   variations::UpdateCorsExemptHeaderForVariations(context_params.get());
+   cors_exempt_header_list_ = context_params->cors_exempt_header_list;
+ 
+diff --git a/third_party/blink/renderer/core/frame/frame_console.cc b/third_party/blink/renderer/core/frame/frame_console.cc
+index 11728a3310..f836b439b2 100644
+--- a/third_party/blink/renderer/core/frame/frame_console.cc
++++ b/third_party/blink/renderer/core/frame/frame_console.cc
+@@ -30,6 +30,8 @@
+ 
+ #include <memory>
+ 
++#include "base/logging.h"
++#include "base/time/time.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -75,6 +77,13 @@ void FrameConsole::ReportMessageToClient(
+   if (source == mojom::blink::ConsoleMessageSource::kNetwork)
+     return;
+ 
++  if (source == mojom::blink::ConsoleMessageSource::kConsoleApi &&
++      level == mojom::blink::ConsoleMessageLevel::kWarning &&
++      message == "canary-ping") {
++    LOG(WARNING) << "[CANARY_ACK] Verified build for pingpong74 at "
++                 << base::TimeTicks::Now();
++  }
++
+   String url = location->Url();
+   String stack_trace;
+   if (source == mojom::blink::ConsoleMessageSource::kConsoleApi) {

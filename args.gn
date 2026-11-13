@@ -1,0 +1,6 @@
+is_debug = false
+dcheck_always_on = true
+is_component_build = true
+symbol_level = 0
+blink_symbol_level = 0
+enable_nacl = false
